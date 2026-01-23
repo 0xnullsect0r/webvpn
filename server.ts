@@ -49,7 +49,9 @@ app.get('/proxy', async (req, res) => {
         const response = await axios.get(targetUrl, {
             responseType: 'arraybuffer',
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': req.headers['accept'] || '*/*',
+                'Accept-Language': req.headers['accept-language'] || 'en-US,en;q=0.9',
             },
             maxRedirects: 5,
             validateStatus: (status) => status >= 200 && status < 400
@@ -62,7 +64,28 @@ app.get('/proxy', async (req, res) => {
             return res.redirect(`/proxy?url=${encodeURIComponent(redirectUrl)}`);
         }
 
+        // Strip headers that prevent iframing and potential CSP leaks
+        const headersToStrip = ['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'frame-options'];
+        headersToStrip.forEach(header => {
+            delete response.headers[header];
+        });
+
         const contentType = response.headers['content-type'] as string;
+
+        // Ad blocking check for sub-resources
+        if (adBlocker) {
+            const { match } = adBlocker.match(Request.fromRawDetails({
+                url: targetUrl,
+                type: contentType?.includes('image') ? 'image' : (contentType?.includes('javascript') ? 'script' : (contentType?.includes('css') ? 'stylesheet' : 'other'))
+            }));
+            if (match) {
+                console.log(`Blocked sub-resource: ${targetUrl}`);
+                return res.status(204).end();
+            }
+        }
+        
+        // If it's a script, we might want to rewrite it too, but let's be careful.
+        // For now, we mainly care about HTML and CSS.
 
         if (contentType && contentType.includes('text/html')) {
             const htmlContent = Buffer.from(response.data).toString();
@@ -108,7 +131,7 @@ app.get('/proxy', async (req, res) => {
                         const a = e.target.closest('a');
                         if (a && a.href) {
                             const url = a.getAttribute('href');
-                            if (url && !url.startsWith('#') && !url.startsWith('javascript:')) {
+                            if (url && !url.startsWith('#') && !url.startsWith('javascript:') && !url.startsWith('data:')) {
                                 e.preventDefault();
                                 window.location.href = rewrite(a.href);
                             }
@@ -131,7 +154,9 @@ app.get('/proxy', async (req, res) => {
                                 if (node.nodeType === 1) { // Element
                                     if (node.tagName === 'A' && node.href) node.href = rewrite(node.href);
                                     if (node.tagName === 'IMG' && node.src) node.src = rewrite(node.src);
-                                    // ... add more as needed, but the event listeners handle most clicks/requests
+                                    if (node.tagName === 'IFRAME' && node.src) node.src = rewrite(node.src);
+                                    if (node.tagName === 'SCRIPT' && node.src) node.src = rewrite(node.src);
+                                    if (node.tagName === 'LINK' && node.href) node.href = rewrite(node.href);
                                 }
                             });
                         });
@@ -146,7 +171,8 @@ app.get('/proxy', async (req, res) => {
             meta.setAttribute('http-equiv', 'Content-Security-Policy');
             // We allow 'self' for all, and 'unsafe-inline'/'unsafe-eval' because many sites need them.
             // connect-src 'self' is the key to preventing direct XHR/fetch to other domains.
-            meta.setAttribute('content', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self'; media-src 'self' blob:; worker-src 'self' blob:;");
+            // We also need to allow the proxy's domain specifically if it's different, but 'self' usually covers it.
+            meta.setAttribute('content', "default-src 'self' data: blob:; connect-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self'; media-src 'self' blob:; worker-src 'self' blob:;");
             doc.head.insertBefore(meta, doc.head.firstChild);
 
             // Add <base> tag to help resolve relative URLs in case some are missed
@@ -171,8 +197,14 @@ app.get('/proxy', async (req, res) => {
             doc.querySelectorAll('link').forEach(el => rewriteUrl('href', el));
             doc.querySelectorAll('script').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('form').forEach(el => rewriteUrl('action', el));
-            doc.querySelectorAll('source').forEach(el => rewriteUrl('src', el));
-            doc.querySelectorAll('video').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('source').forEach(el => {
+                rewriteUrl('src', el);
+                rewriteUrl('srcset', el);
+            });
+            doc.querySelectorAll('video').forEach(el => {
+                rewriteUrl('src', el);
+                rewriteUrl('poster', el);
+            });
             doc.querySelectorAll('audio').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('iframe').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('embed').forEach(el => rewriteUrl('src', el));
