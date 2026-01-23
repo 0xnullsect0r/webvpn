@@ -1,10 +1,18 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
 function App() {
   const [url, setUrl] = useState('')
   const [currentUrl, setCurrentUrl] = useState('')
   const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(reg => console.log('Service Worker registered', reg))
+        .catch(err => console.error('Service Worker registration failed', err));
+    }
+  }, []);
 
   const handleGo = (e?: React.FormEvent) => {
     e?.preventDefault()
