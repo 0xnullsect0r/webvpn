@@ -23,15 +23,15 @@ function App() {
     try {
         const iframeWindow = iframeRef.current?.contentWindow;
         if (iframeWindow) {
-            const innerUrl = iframeWindow.location.search;
-            const params = new URLSearchParams(innerUrl);
-            const originalUrl = params.get('url');
-            if (originalUrl) {
+            const innerUrl = iframeWindow.location.href;
+            const urlObj = new URL(innerUrl);
+            const originalUrl = urlObj.searchParams.get('url');
+            if (originalUrl && originalUrl !== url) {
                 setUrl(originalUrl);
             }
         }
     } catch (e) {
-        // Cross-origin error
+        // Cross-origin error (should not happen if proxied to same origin)
     }
   }
 

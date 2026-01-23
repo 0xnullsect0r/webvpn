@@ -50,8 +50,17 @@ app.get('/proxy', async (req, res) => {
             responseType: 'arraybuffer',
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            },
+            maxRedirects: 5,
+            validateStatus: (status) => status >= 200 && status < 400
         });
+
+        // Handle redirects manually if needed, or let axios handle it
+        // If it's a redirect, we need to rewrite the Location header and send it back
+        if (response.status >= 300 && response.status < 400 && response.headers['location']) {
+            const redirectUrl = new URL(response.headers['location'], targetUrl).href;
+            return res.redirect(`/proxy?url=${encodeURIComponent(redirectUrl)}`);
+        }
 
         const contentType = response.headers['content-type'] as string;
 
@@ -109,11 +118,25 @@ app.get('/proxy', async (req, res) => {
                     // Intercept Form Submissions
                     document.addEventListener('submit', e => {
                         const form = e.target;
-                        if (form.action) {
-                            // This is tricky for POST, but we can try to rewrite the action
+                        if (form.action && !form.action.startsWith(window.location.origin)) {
+                             // This is tricky for POST, but we can try to rewrite the action
                             form.action = rewrite(form.action);
                         }
                     }, true);
+
+                    // Periodically check for dynamically added elements (optional but can help)
+                    const observer = new MutationObserver((mutations) => {
+                        mutations.forEach((mutation) => {
+                            mutation.addedNodes.forEach((node) => {
+                                if (node.nodeType === 1) { // Element
+                                    if (node.tagName === 'A' && node.href) node.href = rewrite(node.href);
+                                    if (node.tagName === 'IMG' && node.src) node.src = rewrite(node.src);
+                                    // ... add more as needed, but the event listeners handle most clicks/requests
+                                }
+                            });
+                        });
+                    });
+                    observer.observe(document.documentElement, { childList: true, subtree: true });
                 })();
             `;
             doc.head.insertBefore(script, doc.head.firstChild);
@@ -123,8 +146,13 @@ app.get('/proxy', async (req, res) => {
             meta.setAttribute('http-equiv', 'Content-Security-Policy');
             // We allow 'self' for all, and 'unsafe-inline'/'unsafe-eval' because many sites need them.
             // connect-src 'self' is the key to preventing direct XHR/fetch to other domains.
-            meta.setAttribute('content', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self'; media-src 'self' blob:;");
+            meta.setAttribute('content', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self'; media-src 'self' blob:; worker-src 'self' blob:;");
             doc.head.insertBefore(meta, doc.head.firstChild);
+
+            // Add <base> tag to help resolve relative URLs in case some are missed
+            const base = doc.createElement('base');
+            base.href = `/proxy?url=${encodeURIComponent(targetUrl)}`;
+            doc.head.insertBefore(base, doc.head.firstChild);
 
             const rewriteUrl = (attr: string, element: Element) => {
                 const value = element.getAttribute(attr);
@@ -150,6 +178,25 @@ app.get('/proxy', async (req, res) => {
             doc.querySelectorAll('embed').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('object').forEach(el => rewriteUrl('data', el));
             doc.querySelectorAll('track').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('area').forEach(el => rewriteUrl('href', el));
+            doc.querySelectorAll('input[type="image"]').forEach(el => rewriteUrl('src', el));
+
+            // Rewrite inline styles that might have url()
+            doc.querySelectorAll('[style]').forEach(el => {
+                const style = el.getAttribute('style');
+                if (style && style.includes('url(')) {
+                    const newStyle = style.replace(/url\(['"]?([^'")]+)['"]?\)/g, (match, p1) => {
+                        try {
+                            if (p1.startsWith('data:')) return match;
+                            const absoluteUrl = new URL(p1, targetUrl).href;
+                            return `url(/proxy?url=${encodeURIComponent(absoluteUrl)})`;
+                        } catch (e) {
+                            return match;
+                        }
+                    });
+                    el.setAttribute('style', newStyle);
+                }
+            });
 
             // Rewrite srcset attributes
             doc.querySelectorAll('[srcset]').forEach(el => {
