@@ -104,10 +104,8 @@ app.get('/proxy', async (req, res) => {
 });
 
 // Fallback to index.html for SPA routing
-app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/proxy')) {
-        return next();
-    }
+app.get(/^(?!\/proxy).*$/, (req: any, res: any) => {
+    console.log(`Fallback for path: ${req.path}`);
     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
