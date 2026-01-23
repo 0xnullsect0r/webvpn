@@ -131,7 +131,121 @@ app.all('/proxy', async (req, res) => {
             };
 
             doc.querySelectorAll('a').forEach(el => rewriteUrl('href', el));
+            doc.querySelectorAll('area').forEach(el => rewriteUrl('href', el));
             doc.querySelectorAll('form').forEach(el => rewriteUrl('action', el));
+            doc.querySelectorAll('img').forEach(el => {
+                rewriteUrl('src', el);
+                rewriteUrl('srcset', el);
+            });
+            doc.querySelectorAll('script').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('link').forEach(el => rewriteUrl('href', el));
+            doc.querySelectorAll('iframe').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('video, audio').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('source').forEach(el => {
+                rewriteUrl('src', el);
+                rewriteUrl('srcset', el);
+            });
+            doc.querySelectorAll('embed').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('object').forEach(el => rewriteUrl('data', el));
+            doc.querySelectorAll('track').forEach(el => rewriteUrl('src', el));
+
+            // Rewrite inline styles
+            doc.querySelectorAll('[style]').forEach(el => {
+                const style = el.getAttribute('style');
+                if (style) {
+                    const rewrittenStyle = style.replace(/url\(['"]?([^'")]+)['"]?\)/g, (match, p1) => {
+                        try {
+                            if (p1.startsWith('data:')) return match;
+                            const absoluteUrl = new URL(p1, targetUrl).href;
+                            return `url(/proxy?url=${encodeURIComponent(absoluteUrl)})`;
+                        } catch (e) {
+                            return match;
+                        }
+                    });
+                    el.setAttribute('style', rewrittenStyle);
+                }
+            });
+
+            // Inject CSP to prevent any direct traffic
+            const csp = doc.createElement('meta');
+            csp.setAttribute('http-equiv', 'Content-Security-Policy');
+            csp.setAttribute('content', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data:; media-src 'self' data:; connect-src 'self';");
+            doc.head.insertBefore(csp, doc.head.firstChild);
+
+            // Inject script to help with dynamic requests and ensure SW is active
+            const script = doc.createElement('script');
+            script.textContent = `
+                (function() {
+                    // Try to ensure Service Worker is active for this client
+                    if ('serviceWorker' in navigator) {
+                        navigator.serviceWorker.register('/sw.js').then(reg => {
+                            if (reg.active) reg.active.postMessage({type: 'CLAIM_CLIENTS'});
+                        });
+                    }
+
+                    // Monkey-patch fetch and XHR as a fallback
+                    const originalFetch = window.fetch;
+                    window.fetch = function(input, init) {
+                        if (typeof input === 'string' && !input.startsWith('/') && !input.startsWith(window.location.origin)) {
+                            input = '/proxy?url=' + encodeURIComponent(new URL(input, '${targetUrl}').href);
+                        }
+                        return originalFetch.call(this, input, init);
+                    };
+
+                    const originalOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        if (typeof url === 'string' && !url.startsWith('/') && !url.startsWith(window.location.origin)) {
+                            url = '/proxy?url=' + encodeURIComponent(new URL(url, '${targetUrl}').href);
+                        }
+                        return originalOpen.apply(this, arguments);
+                    };
+
+                    // Intercept link clicks and form submissions for dynamically added elements
+                    document.addEventListener('click', function(e) {
+                        let target = e.target;
+                        while (target && target.tagName !== 'A') target = target.parentElement;
+                        if (target && target.href && !target.href.startsWith(window.location.origin)) {
+                             // This is handled by the browser if we already rewrote the href, 
+                             // but for dynamically added ones that missed rewriting:
+                             if (!target.href.includes('/proxy?url=')) {
+                                 target.href = '/proxy?url=' + encodeURIComponent(new URL(target.getAttribute('href'), '${targetUrl}').href);
+                             }
+                        }
+                    }, true);
+
+                    // MutationObserver to rewrite dynamically added elements
+                    const observer = new MutationObserver(mutations => {
+                        mutations.forEach(mutation => {
+                            mutation.addedNodes.forEach(node => {
+                                if (node.nodeType === 1) { // Element
+                                    const el = node;
+                                    const tags = ['a', 'img', 'script', 'link', 'iframe', 'video', 'audio', 'source', 'form'];
+                                    const attrs = ['href', 'src', 'action', 'srcset'];
+                                    
+                                    const rewrite = (element) => {
+                                        attrs.forEach(attr => {
+                                            if (element.hasAttribute(attr)) {
+                                                const val = element.getAttribute(attr);
+                                                if (val && !val.startsWith('/') && !val.startsWith('http') && !val.startsWith('data:')) {
+                                                     // relative URL
+                                                     element.setAttribute(attr, '/proxy?url=' + encodeURIComponent(new URL(val, '${targetUrl}').href));
+                                                } else if (val && (val.startsWith('http') && !val.startsWith(window.location.origin))) {
+                                                     element.setAttribute(attr, '/proxy?url=' + encodeURIComponent(val));
+                                                }
+                                            }
+                                        });
+                                    };
+
+                                    if (tags.includes(el.tagName.toLowerCase())) rewrite(el);
+                                    el.querySelectorAll(tags.join(',')).forEach(rewrite);
+                                }
+                            });
+                        });
+                    });
+                    observer.observe(document.documentElement, { childList: true, subtree: true });
+                })();
+            `;
+            doc.head.insertBefore(script, doc.head.firstChild);
 
             // Apply cosmetic filters
             if (adBlocker) {

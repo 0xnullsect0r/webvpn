@@ -6,6 +6,12 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'CLAIM_CLIENTS') {
+    self.clients.claim();
+  }
+});
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   
@@ -20,7 +26,11 @@ self.addEventListener('fetch', (event) => {
         return;
     }
     // Static assets for the app itself
-    if (url.pathname.startsWith('/src') || url.pathname.startsWith('/node_modules') || url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
+    if (url.pathname.startsWith('/src') || url.pathname.startsWith('/node_modules') || url.pathname.endsWith('.js') || url.pathname.endsWith('.css') || url.pathname.startsWith('/assets') || url.pathname === '/vite.svg') {
+        return;
+    }
+    // Don't intercept the root page or index.html
+    if (url.pathname === '/' || url.pathname === '/index.html') {
         return;
     }
   }
