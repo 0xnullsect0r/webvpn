@@ -12,8 +12,10 @@
     "start": "npm run server & npm run dev"
   },
   "dependencies": {
+    "@ghostery/adblocker": "^2.13.4",
     "axios": "^1.13.2",
     "cors": "^2.8.6",
+    "cross-fetch": "^4.1.0",
     "express": "^5.2.1",
     "jsdom": "^27.4.0",
     "react": "^19.2.0",

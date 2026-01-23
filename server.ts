@@ -4,12 +4,22 @@ import axios from 'axios';
 import { JSDOM } from 'jsdom';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { FiltersEngine, Request } from '@ghostery/adblocker';
+import fetch from 'cross-fetch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+let adBlocker: FiltersEngine | null = null;
+
+// Initialize ad blocker
+FiltersEngine.fromPrebuiltAdsAndTracking(fetch).then((engine) => {
+    adBlocker = engine;
+    console.log('Ad blocker initialized');
+});
 
 app.use(cors());
 app.use(express.json());
@@ -22,6 +32,17 @@ app.get('/proxy', async (req, res) => {
 
     if (!targetUrl) {
         return res.status(400).send('URL is required');
+    }
+
+    // Ad blocking check
+    if (adBlocker) {
+        const { match } = adBlocker.match(Request.fromRawDetails({
+            url: targetUrl,
+        }));
+        if (match) {
+            console.log(`Blocked ad/tracker: ${targetUrl}`);
+            return res.status(204).end();
+        }
     }
 
     try {
@@ -39,20 +60,71 @@ app.get('/proxy', async (req, res) => {
             const dom = new JSDOM(htmlContent);
             const doc = dom.window.document;
 
-            // Add a script to intercept link clicks and form submissions if they are not caught by our rewriting
+            // Add a script to intercept link clicks and form submissions and dynamic requests
             const script = doc.createElement('script');
             script.textContent = `
-                document.addEventListener('click', e => {
-                    const a = e.target.closest('a');
-                    if (a && a.href) {
-                        const url = new URL(a.href);
-                        if (!url.searchParams.has('url') || !a.href.includes('/proxy')) {
-                             // Intercept clicks on links that weren't rewritten for some reason
+                (function() {
+                    const proxyUrl = window.location.origin + '/proxy?url=';
+                    
+                    const rewrite = (url) => {
+                        if (!url || url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith(window.location.origin)) return url;
+                        try {
+                            const absoluteUrl = new URL(url, "${targetUrl}").href;
+                            return '/proxy?url=' + encodeURIComponent(absoluteUrl);
+                        } catch (e) {
+                            return url;
                         }
-                    }
-                });
+                    };
+
+                    // Intercept Fetch
+                    const originalFetch = window.fetch;
+                    window.fetch = function(input, init) {
+                        if (typeof input === 'string') {
+                            input = rewrite(input);
+                        } else if (input instanceof Request) {
+                            const newRequest = new Request(rewrite(input.url), input);
+                            input = newRequest;
+                        }
+                        return originalFetch.apply(this, [input, init]);
+                    };
+
+                    // Intercept XHR
+                    const originalOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+                        return originalOpen.apply(this, [method, rewrite(url), ...args]);
+                    };
+
+                    // Intercept Link Clicks
+                    document.addEventListener('click', e => {
+                        const a = e.target.closest('a');
+                        if (a && a.href) {
+                            const url = a.getAttribute('href');
+                            if (url && !url.startsWith('#') && !url.startsWith('javascript:')) {
+                                e.preventDefault();
+                                window.location.href = rewrite(a.href);
+                            }
+                        }
+                    }, true);
+
+                    // Intercept Form Submissions
+                    document.addEventListener('submit', e => {
+                        const form = e.target;
+                        if (form.action) {
+                            // This is tricky for POST, but we can try to rewrite the action
+                            form.action = rewrite(form.action);
+                        }
+                    }, true);
+                })();
             `;
-            doc.head.appendChild(script);
+            doc.head.insertBefore(script, doc.head.firstChild);
+
+            // Add CSP to prevent direct connections
+            const meta = doc.createElement('meta');
+            meta.setAttribute('http-equiv', 'Content-Security-Policy');
+            // We allow 'self' for all, and 'unsafe-inline'/'unsafe-eval' because many sites need them.
+            // connect-src 'self' is the key to preventing direct XHR/fetch to other domains.
+            meta.setAttribute('content', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self'; media-src 'self' blob:;");
+            doc.head.insertBefore(meta, doc.head.firstChild);
 
             const rewriteUrl = (attr: string, element: Element) => {
                 const value = element.getAttribute(attr);
@@ -75,6 +147,39 @@ app.get('/proxy', async (req, res) => {
             doc.querySelectorAll('video').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('audio').forEach(el => rewriteUrl('src', el));
             doc.querySelectorAll('iframe').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('embed').forEach(el => rewriteUrl('src', el));
+            doc.querySelectorAll('object').forEach(el => rewriteUrl('data', el));
+            doc.querySelectorAll('track').forEach(el => rewriteUrl('src', el));
+
+            // Rewrite srcset attributes
+            doc.querySelectorAll('[srcset]').forEach(el => {
+                const srcset = el.getAttribute('srcset');
+                if (srcset) {
+                    const newSrcset = srcset.split(',').map(part => {
+                        const [url, size] = part.trim().split(/\s+/);
+                        if (url) {
+                            try {
+                                const absoluteUrl = new URL(url, targetUrl).href;
+                                return `/proxy?url=${encodeURIComponent(absoluteUrl)}${size ? ' ' + size : ''}`;
+                            } catch (e) {
+                                return part;
+                            }
+                        }
+                        return part;
+                    }).join(', ');
+                    el.setAttribute('srcset', newSrcset);
+                }
+            });
+
+            // Apply cosmetic filters (hide ad elements)
+            if (adBlocker) {
+                const cosmeticFilters = adBlocker.getCosmeticsFilters(Request.fromRawDetails({ url: targetUrl }));
+                if (cosmeticFilters && cosmeticFilters.styles) {
+                    const style = doc.createElement('style');
+                    style.textContent = cosmeticFilters.styles;
+                    doc.head.appendChild(style);
+                }
+            }
 
             res.send(dom.serialize());
         } else if (contentType && (contentType.includes('text/css') || contentType.includes('javascript'))) {
