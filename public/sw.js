@@ -58,18 +58,30 @@ self.addEventListener('fetch', (event) => {
         // Clone the request to modify it
         const headers = new Headers(event.request.headers);
         
-        const fetchOptions: any = {
+        const fetchOptions = {
           method: event.request.method,
           headers: headers,
           credentials: 'omit',
           mode: 'cors'
         };
 
+        let body;
         if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-          fetchOptions.body = await event.request.blob();
+          body = await event.request.blob();
         }
         
-        return fetch(proxyUrl, fetchOptions);
+        const response = await fetch(proxyUrl, { ...fetchOptions, body });
+        
+        // Strip security headers from the proxied response as well
+        const newHeaders = new Headers(response.headers);
+        const headersToStrip = ['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'frame-options', 'x-content-security-policy', 'x-webkit-csp'];
+        headersToStrip.forEach(function(h) { newHeaders.delete(h); });
+
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: newHeaders
+        });
       } catch (e) {
         return fetch(event.request);
       }

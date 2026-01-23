@@ -89,10 +89,12 @@ app.all('/proxy', async (req, res) => {
             return res.redirect(`/proxy?url=${encodeURIComponent(redirectUrl)}`);
         }
 
-        // Strip headers that prevent iframing
-        const headersToStrip = ['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'frame-options'];
-        headersToStrip.forEach(header => {
-            delete response.headers[header];
+        // Strip headers that prevent iframing (case-insensitive)
+        const headersToStrip = ['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'frame-options', 'x-content-security-policy', 'x-webkit-csp'];
+        Object.keys(response.headers).forEach(header => {
+            if (headersToStrip.includes(header.toLowerCase())) {
+                delete response.headers[header];
+            }
         });
 
         const contentType = (response.headers['content-type'] as string) || '';
@@ -176,6 +178,23 @@ app.all('/proxy', async (req, res) => {
             const script = doc.createElement('script');
             script.textContent = `
                 (function() {
+                    // Frame-busting protection
+                    try {
+                        if (window.top !== window.self) {
+                            window.top = window.self;
+                        }
+                    } catch (e) {}
+                    
+                    Object.defineProperty(window, 'top', {
+                        get: function() { return window.self; }
+                    });
+                    Object.defineProperty(window, 'parent', {
+                        get: function() { return window.self; }
+                    });
+                    Object.defineProperty(document, 'referrer', {
+                        get: function() { return '${targetUrl}'; }
+                    });
+
                     // Try to ensure Service Worker is active for this client
                     if ('serviceWorker' in navigator) {
                         navigator.serviceWorker.register('/sw.js').then(reg => {

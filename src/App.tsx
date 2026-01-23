@@ -65,6 +65,7 @@ function App() {
             className="browser-iframe"
             onLoad={handleIframeLoad}
             title="Web VPN Browser"
+            sandbox="allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts allow-storage-access-by-user-activation allow-top-navigation-by-user-activation"
           />
         ) : (
           <div className="welcome-screen">
